@@ -84,7 +84,7 @@ def draw_card(ball_instance: "BallInstance") -> tuple[Image.Image, dict[str, Any
     draw = ImageDraw.Draw(image, 'RGBA')
 
     # Capacity Frame: draw rectangle behind capacity and stats (disable if baked into template)
-    if not ball_instance.capacity_frame_drawn:
+    if (not ball_instance.specialcard) or (ball_instance.specialcard and ball_instance.capacity_frame_drawn):
         draw.rectangle(((35, 1040), (1392, 1850)), fill=(0, 0, 0, 128), outline=(255, 255, 255, 255), width=5)
     #draw.text((50, 20), ball.short_name or ball.country, font=title_font, stroke_width=2, stroke_fill=(0, 0, 0, 255))
     # Draw name
@@ -164,7 +164,7 @@ def draw_card(ball_instance: "BallInstance") -> tuple[Image.Image, dict[str, Any
     image.paste(ImageOps.fit(artwork, artwork_size), CORNERS[0])  # type: ignore
 
     # Disabled by default, enable if rounded rectangle used as background
-    #create_alpha_layer(image=image, radius=RADIUS)
+    create_alpha_layer(image=image, radius=RADIUS)
 
     if icon:
         icon = ImageOps.fit(icon, (192, 192))
