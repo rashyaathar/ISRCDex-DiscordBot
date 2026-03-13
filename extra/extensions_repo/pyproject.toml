@@ -1,0 +1,8 @@
+[project]
+name = "extensions_repo"
+version = "1.0.0"
+
+dependencies = [
+    # you can require a specific version of ballsdex here
+    "ballsdex>=3.0.0",
+]

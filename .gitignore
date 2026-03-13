@@ -40,6 +40,4 @@ docker-compose.override.yml
 admin_panel/admin_panel/settings/production.py
 
 # extra package dev
-extra/*
-!extra/.gitkeep
 .gitmodules
