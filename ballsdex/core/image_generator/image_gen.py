@@ -84,7 +84,7 @@ def draw_card(ball_instance: "BallInstance") -> tuple[Image.Image, dict[str, Any
     draw = ImageDraw.Draw(image, 'RGBA')
 
     # Capacity Frame: draw rectangle behind capacity and stats (disable if baked into template)
-    if not special_image:
+    if not ball_instance.capacity_frame_drawn:
         draw.rectangle(((35, 1040), (1392, 1850)), fill=(0, 0, 0, 128), outline=(255, 255, 255, 255), width=5)
     #draw.text((50, 20), ball.short_name or ball.country, font=title_font, stroke_width=2, stroke_fill=(0, 0, 0, 255))
     # Draw name

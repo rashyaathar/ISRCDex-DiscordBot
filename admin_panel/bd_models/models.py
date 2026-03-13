@@ -258,6 +258,8 @@ class Special(models.Model):
         max_length=20, blank=True, null=True, help_text="Either a unicode character or a discord emoji ID"
     )
     background = models.ImageField(max_length=200, blank=True, null=True, help_text="1428x2000 PNG image")
+    capacity_frame_enabled = models.BooleanField(help_text="Whether balls of this event use the built-in frame",
+                                                 default=False)
     tradeable = models.BooleanField(help_text="Whether balls of this event can be traded", default=True)
     hidden = models.BooleanField(help_text="Hides the event from user commands", default=False)
     credits = models.CharField(max_length=64, help_text="Author of the special event artwork", null=True)
@@ -433,6 +435,10 @@ class BallInstance(models.Model):
     @property
     def specialcard(self) -> Special | None:
         return specials.get(self.special_id, None) if self.special_id else None
+
+    @property
+    def capacity_frame_drawn(self) -> bool:
+        return getattr(self.specialcard, "capacity_frame_enabled", False)
 
     @admin.display(description="Countryball")
     def admin_description(self) -> SafeText:
