@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, cast
 import discord
 from discord.ext import commands
 
+from ballsdex.core import tracing
+from ballsdex.core.hooks import SpawnCheckContext
 from bd_models.models import GuildConfig
 from settings.models import settings
 
@@ -55,22 +57,34 @@ class CountryBallsSpawner(commands.Cog):
             return
 
         result = await self.spawn_manager.handle_message(message)
-        if result is False:
-            return
 
         if isinstance(result, tuple):
             result, algo = result
         else:
             algo = settings.spawn_manager
 
-        channel = guild.get_channel(self.cache[guild.id])
-        if not channel:
-            log.warning(f"Lost channel {self.cache[guild.id]} for guild {guild.name}.")
-            del self.cache[guild.id]
+        if result is False:
             return
-        ball = await BallSpawnView.get_random(self.bot)
-        ball.algo = algo
-        await ball.spawn(cast(discord.TextChannel, channel))
+
+        with tracing.span("countryballs.spawn"):
+            tracing.set_tag("spawn.result", result)
+            tracing.set_tag("spawn.algo", algo)
+
+            channel = guild.get_channel(self.cache[guild.id])
+            if not channel:
+                log.warning(f"Lost channel {self.cache[guild.id]} for guild {guild.name}.")
+                del self.cache[guild.id]
+                return
+            spawn_check = await self.bot.hooks.run(
+                SpawnCheckContext(guild=guild, channel=cast(discord.TextChannel, channel), message=message, algo=algo)
+            )
+            if spawn_check.cancelled:
+                tracing.set_tag("spawn.cancelled", True)
+                return
+            ball = await BallSpawnView.get_random(self.bot)
+            ball.algo = algo
+            tracing.set_tag("ball.country", ball.model.country)
+            await ball.spawn(cast(discord.TextChannel, channel))
 
     @commands.Cog.listener()
     async def on_ballsdex_settings_change(

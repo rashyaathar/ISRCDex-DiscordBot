@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import discord
-from discord.ui import ActionRow, Select, TextDisplay
+from discord.ui import ActionRow, Button, Select, TextDisplay
 from django.db.models import Count, Exists, OuterRef, Q, Value
 
 from ballsdex.core.discord import LayoutView
@@ -18,13 +18,27 @@ class CountryballsViewer(LayoutView):
     header = TextDisplay("")
     select_row = ActionRow()
 
+    def __init__(self, ephemeral: bool = False, *, timeout: float | None = 180) -> None:
+        super().__init__(timeout=timeout)
+        self.ephemeral = ephemeral
+
     @select_row.select()
     async def selected(self, interaction: discord.Interaction["BallsDexBot"], select: Select):
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(thinking=True, ephemeral=self.ephemeral)
         ball = await BallInstance.objects.prefetch_related("trade_player").aget(pk=select.values[0])
         content, file, view = await ball.prepare_for_message(interaction)
-        await interaction.followup.send(content=content, file=file, view=view)
+        await interaction.followup.send(content=content, file=file, view=view, ephemeral=self.ephemeral)
         file.close()
+
+    quit_row = ActionRow()
+
+    @quit_row.button(label="Quit", style=discord.ButtonStyle.danger)
+    async def quit_button(self, interaction: discord.Interaction["BallsDexBot"], button_obj: Button):
+        self.stop()
+        for item in self.walk_children():
+            if hasattr(item, "disabled"):
+                item.disabled = True  # type: ignore
+        await interaction.response.edit_message(view=self)
 
 
 class CountryballsDuplicateSource(LayoutView):
@@ -103,7 +117,19 @@ class CountryballsDuplicateSource(LayoutView):
         embed = discord.Embed(title=f"{name} Collection", description=desc, color=discord.Color.blurple())
         embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
         if countryball:
-            emoji = interaction.client.get_emoji(countryball.emoji_id)
-            if emoji:
-                embed.set_thumbnail(url=emoji.url)
-        await interaction.followup.send(embed=embed)
+            file_location = countryball.wild_card.path
+            file = discord.File(file_location, filename="countryball.png")
+            embed.set_thumbnail(url="attachment://countryball.png")
+            await interaction.followup.send(embed=embed, file=file)
+        else:
+            await interaction.followup.send(embed=embed)
+
+    quit_row = ActionRow()
+
+    @quit_row.button(label="Quit", style=discord.ButtonStyle.danger)
+    async def quit_button(self, interaction: discord.Interaction["BallsDexBot"], button_obj: Button):
+        self.stop()
+        for item in self.walk_children():
+            if hasattr(item, "disabled"):
+                item.disabled = True  # type: ignore
+        await interaction.response.edit_message(view=self)

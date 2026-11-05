@@ -8,6 +8,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from settings.models import settings
 
 if TYPE_CHECKING:
+    from django.db.models.fields.files import ImageFieldFile
+
     from bd_models.models import BallInstance
 
 
@@ -49,6 +51,19 @@ credits_font.set_variation_by_name('Light')
 
 credits_color_cache = {}
 
+
+def open_image(image_file: "ImageFieldFile") -> Image.Image:
+    """
+    Load an image from a model's file field as RGBA, releasing the underlying file descriptor.
+
+    Pillow only takes ownership of the file (and closes it once the image is loaded) when it is
+    given a path. Handing it the field file directly makes Pillow treat it as a borrowed file
+    object, and the descriptor stays open on the model instance instead. Balls, regimes,
+    economies and specials are kept in caches living for the whole lifetime of the bot, so those
+    descriptors would never be released, eventually exhausting the process' limit.
+    """
+    return Image.open(image_file.path).convert("RGBA")
+
 # Draw alpha layer (use for rounded rectangles)
 def create_alpha_layer(image, radius) -> Image.Image:
     alpha = Image.new('L', image.size, 0)
@@ -73,7 +88,7 @@ def draw_card(ball_instance: "BallInstance") -> tuple[Image.Image, dict[str, Any
     card_name = ball.cached_regime.name
     if special_image := ball_instance.special_card:
         card_name = getattr(ball_instance.specialcard, "name", card_name)
-        image = Image.open(special_image)
+        image = open_image(special_image)
         if ball_instance.specialcard and ball_instance.specialcard.credits:
             special_credits += f" • Special Author: {ball_instance.specialcard.credits}"
     else:

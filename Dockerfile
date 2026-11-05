@@ -23,7 +23,7 @@ RUN apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/c
     apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/main postgresql18-client && \
     apk add --no-cache tiff-dev jpeg-dev openjpeg-dev zlib-dev freetype-dev \
     lcms2-dev libwebp-dev tcl-dev tk-dev harfbuzz-dev fribidi-dev \
-    libimagequant-dev libxcb-dev libpng-dev libavif-dev
+    libimagequant-dev libxcb-dev libpng-dev libavif-dev ffmpeg
 
 ARG UID GID
 RUN addgroup -S ballsdex -g ${GID:-1000} && \
@@ -36,14 +36,18 @@ FROM base AS builder-base
 # Pillow build dependencies
 RUN apk add --no-cache gcc libc-dev git
 
+# Set to a non-empty value (e.g. "1") to also install the "dev" extra (ruff, pyright,
+# django-debug-toolbar, pyinstrument, ...) into the image. Used for local Docker development.
+ARG INSTALL_DEV_DEPS=
+
 COPY --from=ghcr.io/astral-sh/uv:0.7.3 /uv /uvx /bin/
 COPY uv.lock pyproject.toml /code/
 RUN --mount=type=cache,target=/root/.cache/ \
     uv venv $VIRTUAL_ENV && \
-    uv sync --locked --no-install-project --no-editable --active
+    uv sync --locked --no-install-project --no-editable --active ${INSTALL_DEV_DEPS:+--extra dev}
 COPY --parents admin_panel ballsdex LICENSE README.md /code/
 RUN --mount=type=cache,target=/root/.cache/ \
-    uv sync --locked --no-editable --active --reinstall-package ballsdex && \
+    uv sync --locked --no-editable --active --reinstall-package ballsdex ${INSTALL_DEV_DEPS:+--extra dev} && \
     cd admin_panel && django-admin collectstatic --no-input
 
 # this is running in a separate layer to allow bots with different extra packages to run on the same base layer

@@ -1,4 +1,5 @@
 import logging
+from typing import TYPE_CHECKING, cast
 
 import discord
 from discord.ext import commands
@@ -12,7 +13,10 @@ from ballsdex.core.utils.menus import Menu, ModelSource
 from bd_models.models import BlacklistedGuild, BlacklistedID, BlacklistHistory, GuildConfig, Player
 from settings.models import settings
 
-from .menu import BlacklistHistoryFormatter
+from .menu import BlacklistHistoryFormatter, BlacklistHistorySummaryFormatter
+
+if TYPE_CHECKING:
+    import discord.types.interactions
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +92,7 @@ async def blacklist_remove(ctx: commands.Context[BallsDexBot], user: discord.Use
 
 
 @blacklist.command(name="info")
+@checks.has_permissions("bd_models.view_blacklistedid")
 async def blacklist_info(ctx: commands.Context[BallsDexBot], user: discord.User):
     """
     Check if a user is blacklisted and show the corresponding reason.
@@ -171,7 +176,8 @@ async def blacklist_history(ctx: commands.Context[BallsDexBot], user_id: str):
 
     history = BlacklistHistory.objects.filter(discord_id=_id).order_by("-date")
 
-    if not await history.aexists():
+    total = await history.acount()
+    if total == 0:
         await ctx.send("No history found for that ID.", ephemeral=True)
         return
 
@@ -181,10 +187,31 @@ async def blacklist_history(ctx: commands.Context[BallsDexBot], user_id: str):
         await ctx.send("User was not found from Discord.", ephemeral=True)
         return
 
+    async def select_callback(interaction: discord.Interaction[BallsDexBot]):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        data = cast("discord.types.interactions.SelectMessageComponentInteractionData", interaction.data)
+        entry_pk = int(data["values"][0])
+
+        detail_view = discord.ui.LayoutView()
+        detail_container = discord.ui.Container()
+        detail_view.add_item(detail_container)
+        detail_menu = Menu(
+            ctx.bot,
+            detail_view,
+            ModelSource(BlacklistHistory.objects.filter(pk=entry_pk), per_page=1),
+            BlacklistHistoryFormatter(detail_container, user),
+        )
+        await detail_menu.init()
+        await interaction.followup.send(view=detail_view, ephemeral=True)
+
     view = discord.ui.LayoutView()
-    container = discord.ui.Container()
-    view.add_item(container)
-    menu = Menu(ctx.bot, view, ModelSource(history, per_page=1), BlacklistHistoryFormatter(container, user))
+    view.add_item(discord.ui.TextDisplay(f"## Blacklist history for {user.mention} ({total} entries)"))
+    action_row = discord.ui.ActionRow()
+    select = discord.ui.Select(placeholder="Select an entry to view its full detail")
+    select.callback = select_callback
+    action_row.add_item(select)
+    view.add_item(action_row)
+    menu = Menu(ctx.bot, view, ModelSource(history, per_page=10), BlacklistHistorySummaryFormatter(select))
     await menu.init()
     await ctx.send(view=view, ephemeral=True)
 
@@ -279,7 +306,7 @@ async def blacklist_remove_guild(ctx: commands.Context[BallsDexBot], guild_id: s
 
 
 @blacklistguild.command(name="info")
-@checks.has_permissions("bd_models.view_blacklistedid")
+@checks.has_permissions("bd_models.view_blacklistedguild")
 async def blacklist_info_guild(ctx: commands.Context[BallsDexBot], guild_id: str):
     """
     Check if a guild is blacklisted and show the corresponding reason.

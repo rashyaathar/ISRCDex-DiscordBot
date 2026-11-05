@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 import discord
 from asgiref.sync import sync_to_async
 from discord.ext import commands
+from django.core.exceptions import SuspiciousFileOperation
 from django.db import connection
 
 from ballsdex.core.dev import send_interactive
@@ -30,6 +31,8 @@ class SimpleCheckView(View):
         self.value = False
 
     async def interaction_check(self, interaction: discord.Interaction["BallsDexBot"]) -> bool:
+        if not await interaction.client.blacklist_check(interaction):
+            return False
         return interaction.user == self.ctx.author
 
     @discord.ui.button(style=discord.ButtonStyle.success, emoji="\N{HEAVY CHECK MARK}\N{VARIATION SELECTOR-16}")
@@ -56,11 +59,15 @@ class Core(commands.Cog):
 
     @commands.command()
     @commands.is_owner()
-    async def reloadtree(self, ctx: commands.Context):
+    async def reloadtree(self, ctx: commands.Context, guild_id: int | None = None):
         """
         Sync the application commands with Discord
         """
-        await self.bot.tree.sync()
+        if guild_id is None:
+            await self.bot.tree.sync()
+        else:
+            guild = discord.Object(id=guild_id)
+            await self.bot.tree.sync(guild=guild)
         await ctx.send("Application commands tree reloaded.")
 
     async def reload_package(self, package: str, *, with_prefix=False):
@@ -131,6 +138,42 @@ class Core(commands.Cog):
 
         delta = await wrapper()
         await ctx.send(f"Analyzed database in {round(delta * 1000)}ms.")
+
+    @commands.command()
+    @commands.is_owner()
+    async def checkmedia(self, ctx: commands.Context):
+        """
+        Check collectible media filesizes and emoji ids
+        """
+
+        lines: list[str] = []
+        lines.append("# Missing emojis:")
+        balls = [ball async for ball in Ball.objects.all()]
+
+        for ball in balls:
+            if self.bot.get_emoji(ball.emoji_id):
+                continue
+
+            lines.append(f" - Ball `{ball.country}` has a broken emoji")
+
+        lines.append("# Broken media:")
+        for ball in balls:
+            try:
+                if not ball.wild_card.storage.exists(ball.wild_card.name):
+                    lines.append(f" - Spawn image for `{ball.country}` is missing")
+                if ball.wild_card.storage.exists(ball.wild_card.name) and ball.wild_card.size > 8 * (10**6):
+                    lines.append(f" - Spawn image for `{ball.country}` is {ball.wild_card.size // 10**6}MB")
+            except SuspiciousFileOperation:
+                lines.append(f" - Spawn image for `{ball.country}` is outside the media root and cannot be used")
+
+            try:
+                if not ball.collection_card.storage.exists(ball.collection_card.name):
+                    lines.append(f" - Collection card for `{ball.country}` is missing")
+            except SuspiciousFileOperation:
+                lines.append(f" - Collection card for `{ball.country}` is outside the media root and cannot be used")
+
+        pages = pagify("\n".join(lines), delims=["###", "\n\n", "\n"], priority=True)
+        await send_interactive(ctx, pages, block=None)
 
     @commands.command()
     @commands.is_owner()

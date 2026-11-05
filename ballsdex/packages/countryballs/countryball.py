@@ -8,14 +8,17 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import discord
-from discord.ui import Button, TextInput, button
+from discord.ui import ActionRow, Button, Item, MediaGallery, TextDisplay, TextInput, button
 from django.utils import timezone
 
-from ballsdex.core.discord import Modal, View
+from ballsdex.core.discord import Container, LayoutView, Modal
+from ballsdex.core.events import BallCaughtEvent, BallSpawnedEvent, dispatch
+from ballsdex.core.hooks import CatchMessageContext, CatchRollContext, PreCatchContext
 from ballsdex.core.metrics import caught_balls
+from ballsdex.core.utils.formatting import format_command_mentions
 from ballsdex.core.utils.utils import can_mention
-from bd_models.models import Ball, BallInstance, Player, Special, Trade, TradeObject, balls, specials
-from settings.models import PromptMessage, settings
+from bd_models.models import Ball, BallInstance, GuildConfig, Player, Special, Trade, TradeObject, balls, specials
+from settings.models import PromptMessage, Settings, settings
 
 if TYPE_CHECKING:
     from ballsdex.core.bot import BallsDexBot
@@ -35,26 +38,27 @@ class CountryballNamePrompt(Modal, title=f"Catch this {settings.collectible_name
     async def on_error(self, interaction: discord.Interaction["BallsDexBot"], error: Exception) -> None:
         if isinstance(error, discord.NotFound) and error.code == 10062:
             return
-        log.exception("An error occured in countryball catching prompt", exc_info=error)
+        log.exception("An error occurred in countryball catching prompt", exc_info=error)
         if interaction.response.is_done():
-            await interaction.followup.send(f"An error occured with this {settings.collectible_name}.")
+            await interaction.followup.send(f"An error occurred with this {settings.collectible_name}.")
         else:
-            await interaction.response.send_message(f"An error occured with this {settings.collectible_name}.")
+            await interaction.response.send_message(f"An error occurred with this {settings.collectible_name}.")
+
+    async def send_slow_message(self, interaction: discord.Interaction["BallsDexBot"], player: Player):
+        slow_message = settings.get_formatted_message(
+            category=PromptMessage.PromptType.SLOW,
+            mention=interaction.user.mention,
+            model=self.view.model,
+            bot=interaction.client,
+        )
+        await interaction.followup.send(slow_message, ephemeral=True, allowed_mentions=await can_mention([player]))
 
     async def on_submit(self, interaction: discord.Interaction["BallsDexBot"]):
         await interaction.response.defer(thinking=True)
 
         player, _ = await Player.objects.aget_or_create(discord_id=interaction.user.id)
         if self.view.caught:
-            slow_message = settings.get_random_message(PromptMessage.PromptType.SLOW).format(
-                user=interaction.user.mention,
-                collectible=settings.collectible_name,
-                ball=self.view.name,
-                collectibles=settings.plural_collectible_name,
-                emoji=interaction.client.get_emoji(self.view.model.emoji_id),
-            )
-
-            await interaction.followup.send(slow_message, ephemeral=True, allowed_mentions=await can_mention([player]))
+            await self.send_slow_message(interaction, player)
             return
 
         if not self.view.is_name_valid(self.name.value):
@@ -63,29 +67,74 @@ class CountryballNamePrompt(Modal, title=f"Catch this {settings.collectible_name
             else:
                 wrong_name = self.name.value
 
-            wrong_message = settings.get_random_message(PromptMessage.PromptType.WRONG).format(
-                user=interaction.user.mention,
-                collectible=settings.collectible_name,
-                ball=self.view.name,
-                collectibles=settings.plural_collectible_name,
+            wrong_message = settings.get_formatted_message(
+                category=PromptMessage.PromptType.WRONG,
+                mention=interaction.user.mention,
+                model=self.view.model,
+                bot=interaction.client,
                 wrong=wrong_name,
-                emoji=interaction.client.get_emoji(self.view.model.emoji_id),
             )
             await interaction.followup.send(
                 wrong_message, allowed_mentions=await can_mention([player]), ephemeral=False
             )
             return
 
+        pre_catch = await interaction.client.hooks.run(
+            PreCatchContext(view=self.view, interaction=interaction, player=player, guess=self.name.value)
+        )
+        if pre_catch.cancelled:
+            await interaction.followup.send(
+                pre_catch.reason or f"You cannot catch this {settings.collectible_name} right now.", ephemeral=True
+            )
+            return
+        # hooks may have taken some time, someone else could have caught it in the meantime
+        if self.view.caught:
+            await self.send_slow_message(interaction, player)
+            return
+
         ball, has_caught_before = await self.view.catch_ball(interaction.user, player=player, guild=interaction.guild)
 
+        catch_message = await interaction.client.hooks.run(
+            CatchMessageContext(
+                view=self.view,
+                interaction=interaction,
+                player=player,
+                ball_instance=ball,
+                is_new=has_caught_before,
+                content=self.view.get_catch_message(ball, has_caught_before, interaction.user.mention),
+            )
+        )
         await interaction.followup.send(
-            self.view.get_catch_message(ball, has_caught_before, interaction.user.mention),
-            allowed_mentions=discord.AllowedMentions(users=player.can_be_mentioned),
+            catch_message.content, allowed_mentions=discord.AllowedMentions(users=player.can_be_mentioned)
         )
         await interaction.followup.edit_message(self.view.message.id, view=self.view)
 
 
-class BallSpawnView(View):
+class CatchRow(ActionRow["BallSpawnView"]):
+    """
+    The action row holding the catch button. Components v2 does not allow buttons to be defined
+    directly on the view, they must be wrapped in an action row.
+    """
+
+    def __init__(self, spawn_view: BallSpawnView):
+        super().__init__()
+        self.spawn_view = spawn_view
+
+    @button(style=discord.ButtonStyle.primary, label="Catch me!")
+    async def catch_button(self, interaction: discord.Interaction["BallsDexBot"], button: Button):
+        if self.spawn_view.caught:
+            slow_message = settings.get_formatted_message(
+                category=PromptMessage.PromptType.SLOW,
+                mention=interaction.user.mention,
+                model=self.spawn_view.model,
+                bot=interaction.client,
+            )
+            await interaction.response.send_message(slow_message, ephemeral=True)
+        else:
+            await interaction.response.send_modal(CountryballNamePrompt(self.spawn_view))
+
+
+class BallSpawnView(LayoutView):
     """
     BallSpawnView is a Discord UI view that represents the spawning and interaction logic for a
     countryball in the BallsDex bot. It handles user interactions, spawning mechanics, and
@@ -128,7 +177,12 @@ class BallSpawnView(View):
         self.hp_bonus: int | None = None
         self.og_id: int
 
+        self.catch_row = CatchRow(self)
         self.catch_button.label = settings.catch_button_label
+
+    @property
+    def catch_button(self) -> Button["BallSpawnView"]:
+        return self.catch_row.catch_button
 
     async def interaction_check(self, interaction: discord.Interaction["BallsDexBot"], /) -> bool:
         return await interaction.client.blacklist_check(interaction)
@@ -142,20 +196,6 @@ class BallSpawnView(View):
                 pass
         if self.ballinstance and not self.caught:
             await self.ballinstance.unlock()
-
-    @button(style=discord.ButtonStyle.primary, label="Catch me!")
-    async def catch_button(self, interaction: discord.Interaction["BallsDexBot"], button: Button):
-        if self.caught:
-            slow_message = settings.get_random_message(PromptMessage.PromptType.SLOW).format(
-                user=interaction.user.mention,
-                collectible=settings.collectible_name,
-                ball=self.name,
-                collectibles=settings.plural_collectible_name,
-                emoji=interaction.client.get_emoji(self.model.emoji_id),
-            )
-            await interaction.response.send_message(slow_message, ephemeral=True)
-        else:
-            await interaction.response.send_modal(CountryballNamePrompt(self))
 
     @classmethod
     async def from_existing(cls, bot: "BallsDexBot", ball_instance: BallInstance):
@@ -193,7 +233,8 @@ class BallSpawnView(View):
     def name(self):
         return self.model.country
 
-    def get_random_special(self) -> Special | None:
+    @staticmethod
+    def get_random_special() -> Special | None:
         population = [
             x
             for x in specials.values()
@@ -216,6 +257,63 @@ class BallSpawnView(View):
         special: Special | None = random.choices(population=population + [None], weights=weights, k=1)[0]
 
         return special
+
+    async def get_tip(self, guild_id: int | None = None) -> str | None:
+        """
+        Roll for a tip to display below the spawn message.
+
+        Parameters
+        ----------
+        guild_id: int | None
+            The guild where the countryball spawns. If set, its configuration is checked, as server
+            admins may opt out of tips.
+
+        Returns
+        -------
+        str | None
+            A formatted tip, or `None` if tips are disabled, no tip is configured, or the roll
+            against `tip_chance` failed.
+        """
+        if not settings.tip_chance or random.randint(1, 100) > settings.tip_chance:
+            return None
+        if guild_id is not None:
+            # a missing guild config means the default value, which is enabled
+            enabled = (
+                await GuildConfig.objects.filter(guild_id=guild_id).values_list("tips_enabled", flat=True).afirst()
+            )
+            if enabled is False:
+                return None
+        tip = settings.get_formatted_tip()
+        return format_command_mentions(tip, self.bot) if tip else None
+
+    async def build(self, spawn_message: str, file_name: str, guild_id: int | None = None) -> None:
+        """
+        Populate the components of this view. This must be called once, right before sending the
+        spawn message, since the layout depends on the message and the attached image.
+
+        Parameters
+        ----------
+        spawn_message: str
+            The formatted spawn message, displayed above the countryball.
+        file_name: str
+            The name of the image uploaded alongside this view.
+        guild_id: int | None
+            The guild where the countryball spawns, used to determine if a tip may be displayed.
+        """
+        if spawn_message:
+            self.add_item(TextDisplay(spawn_message))
+        self.add_item(MediaGallery(discord.MediaGalleryItem(f"attachment://{file_name}")))
+
+        tip_item: Item[LayoutView] | None = None
+        if tip := await self.get_tip(guild_id):
+            text = TextDisplay(f"-# \N{ELECTRIC LIGHT BULB} {tip}")
+            tip_item = Container(text) if settings.tip_container else text
+
+        if tip_item and settings.tip_position == Settings.TipPosition.ABOVE_BUTTON:
+            self.add_item(tip_item)
+        self.add_item(self.catch_row)
+        if tip_item and settings.tip_position == Settings.TipPosition.BELOW_BUTTON:
+            self.add_item(tip_item)
 
     async def spawn(self, channel: discord.TextChannel) -> bool:
         """
@@ -243,16 +341,15 @@ class BallSpawnView(View):
         try:
             permissions = channel.permissions_for(channel.guild.me)
             if permissions.attach_files and permissions.send_messages:
-                spawn_message = settings.get_random_message(PromptMessage.PromptType.SPAWN).format(
-                    collectible=settings.collectible_name,
-                    ball=self.name,
-                    collectibles=settings.plural_collectible_name,
-                    emoji=self.bot.get_emoji(self.model.emoji_id),
+                spawn_message = settings.get_formatted_message(
+                    category=PromptMessage.PromptType.SPAWN, mention="", model=self.model, bot=self.bot
                 )
+                await self.build(spawn_message, file_name, channel.guild.id)
 
                 self.message = await channel.send(
-                    spawn_message, view=self, file=discord.File(self.model.wild_card.path, filename=file_name)
+                    view=self, file=discord.File(self.model.wild_card.path, filename=file_name)
                 )
+                dispatch(self.bot, BallSpawnedEvent(view=self, channel=channel))
                 return True
             else:
                 log.warning("Missing permission to spawn ball in channel %s.", channel)
@@ -329,6 +426,13 @@ class BallSpawnView(View):
         is_new = not await BallInstance.objects.filter(player=player, ball=self.model).aexists()
 
         if self.ballinstance:
+            if self.ballinstance.player_id == player.pk:
+                # the owner caught their own dropped countryball back, nothing changed hands
+                self.ballinstance.locked = None  # type: ignore
+                await self.ballinstance.asave(update_fields=("locked",))
+                self._dispatch_caught(user, player, guild, self.ballinstance, is_new)
+                return self.ballinstance, is_new
+
             # if specified, do not create a countryball but switch owner
             # it's important to register this as a trade to avoid bypass
             trade = await Trade.objects.acreate(player1=self.ballinstance.player, player2=player)
@@ -339,6 +443,7 @@ class BallSpawnView(View):
             self.ballinstance.player = player
             self.ballinstance.locked = None  # type: ignore
             await self.ballinstance.asave(update_fields=("player", "trade_player", "locked"))
+            self._dispatch_caught(user, player, guild, self.ballinstance, is_new)
             return self.ballinstance, is_new
 
         # stat may vary by +/- 20% of base stat
@@ -359,12 +464,24 @@ class BallSpawnView(View):
         if not special:
             special = self.get_random_special()
 
+        roll = await self.bot.hooks.run(
+            CatchRollContext(
+                view=self,
+                user=user,
+                player=player,
+                special=special,
+                attack_bonus=bonus_attack,
+                health_bonus=bonus_health,
+            )
+        )
+        special = roll.special
+
         ball = await BallInstance.objects.acreate(
             ball=self.model,
             player=player,
             special=special,
-            attack_bonus=bonus_attack,
-            health_bonus=bonus_health,
+            attack_bonus=roll.attack_bonus,
+            health_bonus=roll.health_bonus,
             server_id=guild.id if guild else None,
             spawned_time=self.message.created_at,
             catch_date=caught_time,
@@ -382,9 +499,24 @@ class BallSpawnView(View):
                 # observe the size of the server, rounded to the nearest power of 10
                 guild_size=10 ** math.ceil(math.log(max(user.guild.member_count - 1, 1), 10)),
                 spawn_algo=self.algo,
+                shard_id=user.guild.shard_id,
             ).inc()
 
+        self._dispatch_caught(user, player, guild, ball, is_new)
         return ball, is_new
+
+    def _dispatch_caught(
+        self,
+        user: discord.User | discord.Member,
+        player: Player,
+        guild: discord.Guild | None,
+        ball: BallInstance,
+        is_new: bool,
+    ):
+        dispatch(
+            self.bot,
+            BallCaughtEvent(view=self, user=user, player=player, guild=guild, ball_instance=ball, is_new=is_new),
+        )
 
     def get_catch_message(self, ball: BallInstance, new_ball: bool, mention: str) -> str:
         """
@@ -407,12 +539,8 @@ class BallSpawnView(View):
             text += f"This {settings.collectible_name} was dropped by <@{self.og_id}>\n"
 
         caught_message = (
-            settings.get_random_message(PromptMessage.PromptType.CATCH).format(
-                user=mention,
-                collectible=settings.collectible_name,
-                ball=self.name,
-                collectibles=settings.plural_collectible_name,
-                emoji=self.bot.get_emoji(self.model.emoji_id),
+            settings.get_formatted_message(
+                category=PromptMessage.PromptType.CATCH, mention=mention, model=self.model, bot=self.bot
             )
             + " "
         )

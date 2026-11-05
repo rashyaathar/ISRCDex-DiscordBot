@@ -1,12 +1,16 @@
 import logging
 
 import discord
+from asgiref.sync import sync_to_async
 from discord.ext import commands
+from django.db import connection
 
 from ballsdex.core.bot import BallsDexBot
 from ballsdex.core.utils import checks
+from ballsdex.core.utils.buttons import ConfirmChoiceView
 from bd_models.models import Player
 from settings.models import settings
+from settings.utils import format_currency
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +40,9 @@ async def balance(ctx: commands.Context[BallsDexBot], user: discord.User):
         await ctx.send(f"This user does not have a {settings.bot_name} account.", ephemeral=True)
         return
 
-    await ctx.send(f"{user.mention} currently has {player.money:,} coins.", ephemeral=True)
+    await ctx.send(
+        f"{user.mention} currently has {format_currency(player.money, shortened=False, bot=ctx.bot)}.", ephemeral=True
+    )
 
 
 @money.command()
@@ -62,8 +68,9 @@ async def add(ctx: commands.Context[BallsDexBot], user: discord.User, amount: in
         return
 
     await player.add_money(amount)
-    await ctx.send(f"{amount:,} coins have been added to {user.mention}.", ephemeral=True)
-    log.info(f"{ctx.author} ({ctx.author.id}) added {amount:,} coins to {user} ({user.id})", extra={"webhook": True})
+    formatted = format_currency(amount, shortened=False, bot=ctx.bot)
+    await ctx.send(f"Added {formatted} to {user.mention}.", ephemeral=True)
+    log.info(f"{ctx.author} ({ctx.author.id}) added {formatted} to {user} ({user.id})", extra={"webhook": True})
 
 
 @money.command()
@@ -87,14 +94,18 @@ async def remove(ctx: commands.Context[BallsDexBot], user: discord.User, amount:
     if amount <= 0:
         await ctx.send("The amount must be greater than zero.", ephemeral=True)
         return
-    if not player.can_afford(amount):
-        await ctx.send(f"This user does not have enough coins to remove (balance={player.money:,}).", ephemeral=True)
+    try:
+        await player.remove_money(amount)
+    except ValueError:
+        await ctx.send(
+            f"This user does not have enough {settings.currency_display_plural(ctx.bot)} to remove "
+            f"(balance={format_currency(player.money, shortened=False, bot=ctx.bot)}).",
+            ephemeral=True,
+        )
         return
-    await player.remove_money(amount)
-    await ctx.send(f"{amount:,} coins have been removed from {user.mention}.", ephemeral=True)
-    log.info(
-        f"{ctx.author} ({ctx.author.id}) removed {amount:,} coins from {user} ({user.id})", extra={"webhook": True}
-    )
+    formatted = format_currency(amount, shortened=False, bot=ctx.bot)
+    await ctx.send(f"Removed {formatted} from {user.mention}.", ephemeral=True)
+    log.info(f"{ctx.author} ({ctx.author.id}) removed {formatted} from {user} ({user.id})", extra={"webhook": True})
 
 
 @money.command()
@@ -120,9 +131,47 @@ async def set(ctx: commands.Context[BallsDexBot], user: discord.User, amount: in
         return
 
     player.money = amount
-    await player.asave()
-    await ctx.send(f"{user.mention} now has {amount:,} coins.", ephemeral=True)
+    await player.asave(update_fields=("money",))
+    formatted = format_currency(amount, shortened=False, bot=ctx.bot)
+    await ctx.send(f"{user.mention} now has {formatted}.", ephemeral=True)
     log.info(
-        f"{ctx.author} ({ctx.author.id}) set the balance of {user} ({user.id}) to {amount:,} coins",
-        extra={"webhook": True},
+        f"{ctx.author} ({ctx.author.id}) set the balance of {user} ({user.id}) to {formatted}", extra={"webhook": True}
     )
+
+
+@money.command()
+@checks.is_superuser()
+async def setdefault(ctx: commands.Context[BallsDexBot], amount: int, force: bool = False):
+    """
+    Set the default amount of currency provided to new users.
+
+    Parameters
+    ----------
+    amount: int
+        The new default amount to set.
+    force: bool
+        If true, then ALL users will have their balance reset to the default!
+    """
+    view = ConfirmChoiceView(ctx)
+    msg = f"You are about to set the new default balance to {format_currency(amount, shortened=False, bot=ctx.bot)}.\n"
+    if force:
+        msg += (
+            ":warning: You have chosen to reset ALL PLAYERS balance and set it to the new amount. "
+            "This operation cannot be undone, all existing balances will be lost.\n"
+        )
+    msg += "\nDo you want to continue?"
+    await ctx.send(msg, view=view)
+    await view.wait()
+    if not view.value:
+        return
+
+    @sync_to_async
+    def wrapper():
+        with connection.cursor() as cursor:
+            cursor.execute(f"ALTER TABLE player ALTER COLUMN money SET DEFAULT {int(amount)}")
+
+    await wrapper()
+    if force:
+        await Player.objects.all().aupdate(money=amount)
+
+    await ctx.send("New default set.")

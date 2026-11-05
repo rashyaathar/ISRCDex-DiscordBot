@@ -11,15 +11,19 @@ from discord.ext import commands
 from django.db.models import Q
 from django.utils import timezone
 
+from ballsdex.core import tracing
 from ballsdex.core.discord import LayoutView
+from ballsdex.core.utils.buttons import ConfirmChoiceView
 from ballsdex.core.utils.menus import Menu, ModelSource
 from ballsdex.core.utils.sorting import FilteringChoices, SortingChoices, filter_balls, sort_balls
 from ballsdex.core.utils.transformers import (
     BallEnabledTransform,
+    BallGroupTransform,
     BallInstanceTransform,
     SpecialEnabledTransform,
     TradeCommandType,
 )
+from ballsdex.core.utils.utils import can_mention
 from bd_models.models import BallInstance, Player
 from bd_models.models import Trade as TradeModel
 from settings.models import settings
@@ -50,6 +54,11 @@ class Trade(commands.GroupCog):
         self.lockdown: str | None = None
         self.trades: dict[int, dict[int, TradeInstance]] = defaultdict(dict)
         self.user_cache: LRUCache[int, discord.User] = LRUCache(maxsize=2000)
+
+        if not settings.currency_enabled and self.__cog_app_commands_group__:
+            history_command = self.__cog_app_commands_group__.get_command("history")
+            if history_command:
+                del history_command._params["currency"]  # type: ignore
 
     async def fetch_user(self, discord_id: int) -> discord.User:
         if cached := self.user_cache.get(discord_id, None):
@@ -109,6 +118,9 @@ class Trade(commands.GroupCog):
         if user.id == interaction.user.id:
             await interaction.response.send_message("You cannot trade with yourself.", ephemeral=True)
             return
+        if user.id in self.bot.blacklist:
+            await interaction.response.send_message("You cannot trade with a blacklisted user.", ephemeral=True)
+            return
 
         player1, _ = await Player.objects.aget_or_create(discord_id=interaction.user.id)
         player2, _ = await Player.objects.aget_or_create(discord_id=user.id)
@@ -133,23 +145,35 @@ class Trade(commands.GroupCog):
 
         await interaction.response.defer(ephemeral=True)
         trade = TradeInstance.configure(self, (player1, interaction.user), (player2, user))
+        # APM: tag the command span with the trade id and capture its trace context so
+        # every subsequent button/modal interaction on this trade links back here.
+        tracing.set_tag("trade.id", trade.trade_id)
+        trade.trade_origin_context = tracing.current_trace_context()
         self.trades[interaction.channel.id][interaction.user.id] = trade
         self.trades[interaction.channel.id][user.id] = trade
         try:
             await trade.trader1.refresh_container()
             await trade.trader2.refresh_container()
-            trade.message = await interaction.channel.send(view=trade)  # type: ignore
-        except Exception:
+            trade.message = await interaction.channel.send(  # type: ignore
+                view=trade, allowed_mentions=await can_mention([player1, player2])
+            )
+        except Exception as exc:
             # unregister the trade if something failed to avoid the 30 min timeout
             del self.trades[interaction.channel.id][interaction.user.id]
             del self.trades[interaction.channel.id][user.id]
             await trade.cleanup()
+            log.error(f"Failed to initialize trade between {interaction.user.id} and {user.id}", exc_info=exc)
             raise
         else:
             await interaction.followup.send("The trade has started.", ephemeral=True)
 
     @app_commands.command(extras={"trade": TradeCommandType.PICK})
-    async def add(self, interaction: Interaction, countryball: BallInstanceTransform):
+    async def add(
+        self,
+        interaction: Interaction,
+        countryball: BallInstanceTransform,
+        special: SpecialEnabledTransform | None = None,
+    ):
         """
         Add a countryball to your trade proposal. You must have a trade open.
 
@@ -157,6 +181,8 @@ class Trade(commands.GroupCog):
         ----------
         countryball: BallInstance
             The countryball you are adding to your trade.
+        special: Special | None
+            The special you want to filter the countryball by.
         """
         result = await self.get_trade(interaction)
         if result is None:
@@ -174,7 +200,12 @@ class Trade(commands.GroupCog):
             )
 
     @app_commands.command(extras={"trade": TradeCommandType.REMOVE})
-    async def remove(self, interaction: Interaction, countryball: BallInstanceTransform):
+    async def remove(
+        self,
+        interaction: Interaction,
+        countryball: BallInstanceTransform,
+        special: SpecialEnabledTransform | None = None,
+    ):
         """
         Remove a countryball from your trade proposal. You must have a trade open.
 
@@ -182,6 +213,8 @@ class Trade(commands.GroupCog):
         ----------
         countryball: BallInstance
             The countryball you are removing from your trade.
+        special: Special | None
+            The special you want to filter the countryball by.
         """
         result = await self.get_trade(interaction)
         if result is None:
@@ -199,21 +232,25 @@ class Trade(commands.GroupCog):
             )
 
     @app_commands.command()
+    @app_commands.describe(currency=f"Only show trades that included {settings.currency_plural}")
     async def history(
         self,
         interaction: Interaction,
-        sorting: Literal["Recent", "Oldest"] = "Recent",
+        sorting: Literal["Newest", "Oldest"] = "Newest",
         trade_user: discord.User | None = None,
         days: int | None = None,
         countryball: BallEnabledTransform | None = None,
         special: SpecialEnabledTransform | None = None,
+        group: BallGroupTransform | None = None,
+        currency: bool = False,
+        filter: FilteringChoices | None = None,
     ):
         """
         Show your trade history.
 
         Parameters
         ----------
-        sorting: Literal["Recent", "Oldest"]
+        sorting: Literal["Newest", "Oldest"]
             The sorting order of your trades.
         trade_user: discord.User | None
             The user you want to filter your trade history with.
@@ -223,11 +260,17 @@ class Trade(commands.GroupCog):
             The countryball you want to filter the trade history by.
         special: Special | None
             The special you want to filter the trade history by.
+        group: BallGroup | None
+            The group you want to filter the trade history by.
+        currency: bool
+            Only show trades that included currency.
+        filter: FilteringChoices
+            Only show trades involving countryballs matching a specific filter.
         """
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         user = interaction.user
-        if sorting == "Recent":
+        if sorting == "Newest":
             sort_value = "-date"
         else:
             sort_value = "date"
@@ -245,7 +288,8 @@ class Trade(commands.GroupCog):
             if trade_user:
                 p2 = await Player.objects.only("id").aget(discord_id=trade_user.id)
         except Player.DoesNotExist:
-            await interaction.response.send_message("One of the players does not exist.", ephemeral=True)
+            send = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
+            await send("One of the players does not exist.", ephemeral=True)
             return
         if trade_user:
             queryset = queryset.filter((Q(player1=p1, player2=p2)) | (Q(player1=p2, player2=p1)))
@@ -254,16 +298,24 @@ class Trade(commands.GroupCog):
 
         if days is not None and days > 0:
             start_date = timezone.now() - timedelta(days=days)
-            queryset = queryset.filter(date__ge=start_date)
+            queryset = queryset.filter(date__gte=start_date)
 
-        if countryball and special:
-            queryset = queryset.filter(
-                Q(tradeobject__ballinstance__ball=countryball) & Q(tradeobject__ballinstance__special=special)
-            ).distinct()
-        elif countryball:
-            queryset = queryset.filter(Q(tradeobject__ballinstance__ball=countryball)).distinct()
-        elif special:
-            queryset = queryset.filter(Q(tradeobject__ballinstance__special=special)).distinct()
+        if countryball or special or group:
+            object_filter = Q()
+            if countryball:
+                object_filter &= Q(tradeobject__ballinstance__ball=countryball)
+            if special:
+                object_filter &= Q(tradeobject__ballinstance__special=special)
+            if group:
+                object_filter &= Q(tradeobject__ballinstance__ball__groups=group)
+            queryset = queryset.filter(object_filter).distinct()
+
+        if currency:
+            queryset = queryset.filter(Q(player1_money__gt=0) | Q(player2_money__gt=0))
+
+        if filter:
+            matching_balls = filter_balls(filter, BallInstance.objects.all(), interaction.guild_id)
+            queryset = queryset.filter(tradeobject__ballinstance__in=matching_balls).distinct()
 
         if not await queryset.aexists():
             await interaction.followup.send("No history found.", ephemeral=True)
@@ -283,14 +335,19 @@ class Trade(commands.GroupCog):
             await interaction.followup.send(view=view, ephemeral=True)
 
         view = LayoutView()
-        view.add_item(discord.ui.TextDisplay("## Trade history"))
+        header = discord.ui.TextDisplay("## Trade history")
+        view.add_item(header)
         action = discord.ui.ActionRow()
         select = discord.ui.Select(placeholder="Choose a trade to display")
         select.callback = callback
         action.add_item(select)
         view.add_item(action)
-        menu = Menu(self.bot, view, ModelSource(queryset), TradeListFormatter(select, self, interaction.user))
+        source = ModelSource(queryset)
+        menu = Menu(self.bot, view, source, TradeListFormatter(select, self, interaction.user))
         await menu.init()
+        total_pages = source.get_max_pages()
+        if total_pages > 1:
+            header.content = f"## Trade history (Page 1/{total_pages})"
         await interaction.followup.send(view=view, ephemeral=True)
 
     @app_commands.command()
@@ -299,8 +356,10 @@ class Trade(commands.GroupCog):
         interaction: Interaction,
         countryball: BallEnabledTransform | None = None,
         sort: SortingChoices | None = None,
+        reverse: bool = False,
         special: SpecialEnabledTransform | None = None,
         filter: FilteringChoices | None = None,
+        group: BallGroupTransform | None = None,
     ):
         """
         Bulk add countryballs to the ongoing trade, with paramaters to aid with searching.
@@ -311,10 +370,14 @@ class Trade(commands.GroupCog):
             The countryball you would like to filter the results to
         sort: SortingChoices
             Choose how countryballs are sorted. Can be used to show duplicates.
+        reverse: bool
+            Reverse the sorted results.
         special: Special
             Filter the results to a special event
         filter: FilteringChoices
             Filter the results to a specific filter
+        group: BallGroup
+            Filter the results to a specific group
         """
         await interaction.response.defer(thinking=True, ephemeral=True)
         result = await self.get_trade(interaction)
@@ -342,6 +405,8 @@ class Trade(commands.GroupCog):
             query = query.filter(ball=countryball)
         if special:
             query = query.filter(special=special)
+        if group:
+            query = query.filter(ball__groups=group)
         if sort:
             query = sort_balls(sort, query)
         if filter:
@@ -350,9 +415,40 @@ class Trade(commands.GroupCog):
         if not await query.aexists():
             await interaction.followup.send(f"No {settings.plural_collectible_name} found.", ephemeral=True)
             return
+        if reverse:
+            query = query.reverse()
 
         view = LayoutView()
         selector = BulkSelector()
         view.add_item(selector)
         await selector.configure(self.bot, self, query)
         await interaction.followup.send(view=view, ephemeral=True)
+
+    @app_commands.command()
+    async def cancel(self, interaction: discord.Interaction["BallsDexBot"]):
+        """
+        Cancel your active trade.
+        """
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await self.get_trade(interaction)
+        if result is None:
+            await interaction.followup.send("You do not have any active trade.")
+            return
+        trade, trader = result
+        if trade.trader1.confirmed and trade.trader2.confirmed:
+            await interaction.followup.send("You can't cancel now; the trade has already gone through.")
+            return
+        view = ConfirmChoiceView(
+            interaction, accept_message="Cancelling the trade...", cancel_message="This request has been cancelled."
+        )
+        await interaction.followup.send("Are you sure you want to cancel this trade?", view=view, ephemeral=True)
+        await view.wait()
+        if not view.value:
+            return
+
+        try:
+            await trader.cancel()
+        except TradeError as e:
+            await interaction.followup.send(e.error_message, ephemeral=True)
+        else:
+            await trade.edit_message(None)

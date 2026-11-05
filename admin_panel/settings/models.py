@@ -6,13 +6,17 @@ import warnings
 from typing import TYPE_CHECKING, cast
 
 from django.conf import settings as django_settings
-from django.core.validators import RegexValidator
+from django.core.validators import MaxValueValidator, RegexValidator
 from django.db import models
 from django.db.models import F, Q
 from django.db.models.signals import post_init
 from django.dispatch import receiver
 from django.forms import ValidationError
 from django.utils.functional import cached_property
+
+if TYPE_CHECKING:
+    from ballsdex.core.bot import BallsDexBot
+    from bd_models.models import Ball
 
 COLON_IDS_RE = re.compile(r"^(\d{17,21}(;\d{17,21})*)?$")
 SLASH_COMMAND_RE = re.compile(r"^[-_'\S]{1,32}$")
@@ -26,8 +30,17 @@ class Settings(models.Model):
     # base settings
     bot_token = models.CharField(help_text="Discord bot token", max_length=80, default="")
     prefix = models.CharField(help_text="Prefix for all text commands", max_length=10, default="b.")
-    collectible_name = models.TextField(help_text="The singular name of your collectible", default="countryball")
-    plural_collectible_name = models.TextField(help_text="The plural name of your collectible", default="countryballs")
+    collectible_name = models.TextField(
+        help_text="The singular name of your collectible",
+        default="countryball",
+        validators=(RegexValidator(SLASH_COMMAND_RE, message="Invalid slash command name."),),
+    )
+    plural_collectible_name = models.TextField(
+        help_text="The plural name of your collectible",
+        default="countryballs",
+        validators=(RegexValidator(SLASH_COMMAND_RE, message="Invalid slash command name."),),
+    )
+
     bot_name = models.TextField(help_text="The name of your bot", default="BallsDex")
     balls_slash_name = models.TextField(
         help_text='Overrides "/balls" slash command',
@@ -56,6 +69,13 @@ class Settings(models.Model):
     currency_symbol_before = models.BooleanField(
         default=False, help_text="If enabled, your currency symbol will be placed before the amount."
     )
+    currency_emoji_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text="Optional emoji ID for your currency. When set, the emoji is shown instead of the currency "
+        "name. The bot must have access to this emoji.",
+    )
 
     @cached_property
     def currency_plural(self) -> str:
@@ -66,6 +86,20 @@ class Settings(models.Model):
     @cached_property
     def currency_enabled(self) -> bool:
         return bool(self.currency_name)
+
+    def currency_emoji(self, bot: "BallsDexBot") -> str | None:
+        if not self.currency_emoji_id:
+            return None
+        emoji = bot.get_emoji(self.currency_emoji_id)
+        return str(emoji) if emoji else None
+
+    def currency_display_name(self, bot: "BallsDexBot | None" = None) -> str:
+        emoji = self.currency_emoji(bot) if bot is not None else None
+        return emoji or self.currency_name or ""
+
+    def currency_display_plural(self, bot: "BallsDexBot | None" = None) -> str:
+        emoji = self.currency_emoji(bot) if bot is not None else None
+        return emoji or self.currency_plural
 
     # further customization
     favorited_collectible_emoji = models.CharField(
@@ -84,6 +118,26 @@ class Settings(models.Model):
         help_text="Whether to show the rarity on the card (replaces economy icon)", default=False
     )
     catch_button_label = models.CharField(max_length=80, help_text="Label of the catch button", default="Catch me")
+
+    class TipPosition(models.IntegerChoices):
+        ABOVE_BUTTON = 1, "Above the catch button"
+        BELOW_BUTTON = 2, "Below the catch button"
+
+    tip_chance = models.PositiveIntegerField(
+        help_text="Percentage of spawns displaying a random tip below the message. A value of 10 means 10% of "
+        "spawns. Set to 0 to disable tips entirely. Server admins can also opt out individually.",
+        default=0,
+        validators=(MaxValueValidator(100),),
+    )
+    tip_position = models.PositiveSmallIntegerField(
+        help_text="Where the tip is placed within the spawn message.",
+        choices=TipPosition,
+        default=TipPosition.ABOVE_BUTTON,
+    )
+    tip_container = models.BooleanField(
+        help_text="Whether to wrap the tip in a container, giving it a visible box instead of plain text.",
+        default=False,
+    )
 
     # spawn algorithm details
     spawn_chance_min = models.PositiveIntegerField(
@@ -180,6 +234,7 @@ class Settings(models.Model):
     )
 
     prompts: models.QuerySet[PromptMessage]
+    tips: models.QuerySet[Tip]
 
     @cached_property
     def catch_messages(self) -> dict[str, float]:
@@ -215,6 +270,52 @@ class Settings(models.Model):
                 return random.choices(
                     population=list(self.slow_messages.keys()), weights=list(self.slow_messages.values()), k=1
                 )[0]
+
+    def get_formatted_message(
+        self, category: PromptMessage.PromptType, model: Ball, mention: str, bot: BallsDexBot, **kwargs: str
+    ):
+        message = self.get_random_message(category)
+        try:
+            return message.format(
+                user=mention,
+                ball=model.country,
+                emoji=str(bot.get_emoji(model.emoji_id)),
+                collectible=self.collectible_name,
+                collectibles=self.plural_collectible_name,
+                **{k: str(v) for k, v in kwargs.items()},
+            )
+        except (ValueError, IndexError, KeyError):
+            return message
+
+    @cached_property
+    def tip_messages(self) -> dict[str, float]:
+        return {x.message: x.rarity for x in self.tips.all() if x.enabled}
+
+    def get_random_tip(self) -> str | None:
+        """
+        Pick a random tip, weighted by rarity. Returns `None` if no tip is enabled.
+        """
+        tips = self.tip_messages
+        if not tips:
+            return None
+        return random.choices(population=list(tips.keys()), weights=list(tips.values()), k=1)[0]
+
+    def get_formatted_tip(self) -> str | None:
+        """
+        Pick a random tip and substitute its placeholders. Returns `None` if no tip is enabled.
+
+        Slash command references (`</command name>`) are *not* resolved here, since this requires
+        the bot to be running. Use `ballsdex.core.utils.formatting.format_command_mentions` for this.
+        """
+        tip = self.get_random_tip()
+        if tip is None:
+            return None
+        try:
+            return tip.format(
+                collectible=self.collectible_name, collectibles=self.plural_collectible_name, bot=self.bot_name
+            )
+        except (ValueError, IndexError, KeyError):
+            return tip
 
     @property
     @warnings.deprecated("This setting returns nothing, Webhook notifications must be used instead")
@@ -264,7 +365,20 @@ class PromptMessage(models.Model):
         )
 
     def __str__(self) -> str:
-        return ""
+        return self.message
+
+
+class Tip(models.Model):
+    settings = models.ForeignKey(Settings, on_delete=models.CASCADE, related_name="tips")
+    message = models.TextField(help_text="The tip to display below spawn messages")
+    enabled = models.BooleanField(default=True, help_text="Disabled tips are never picked.")
+    rarity = models.FloatField(default=1.0, help_text="Weight of tip.")
+
+    class Meta:
+        constraints = (models.UniqueConstraint(fields=("message",), name="tip_message_unique"),)
+
+    def __str__(self) -> str:
+        return self.message
 
 
 @receiver(post_init, sender=Settings)
@@ -304,7 +418,7 @@ else:
 
 
 def load_settings():
-    instance = Settings.objects.prefetch_related("prompts").first()
+    instance = Settings.objects.prefetch_related("prompts", "tips").first()
     if not instance:
         raise RuntimeError("No Settings instance found!")
     singleton = cast(SettingsProxy, settings)

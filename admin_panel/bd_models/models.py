@@ -16,6 +16,7 @@ from django.db import models
 from django.db.models import F, Q
 from django.db.models.functions import Cast
 from django.utils import timezone
+from django.utils.functional import cached_property
 from django.utils.safestring import SafeText, mark_safe
 from django.utils.timezone import now
 
@@ -43,6 +44,7 @@ balls: dict[int, Ball] = {}
 regimes: dict[int, Regime] = {}
 economies: dict[int, Economy] = {}
 specials: dict[int, Special] = {}
+groups: dict[int, BallGroup] = {}
 
 
 class QuerySet[T: models.Model](models.QuerySet[T]):
@@ -80,6 +82,12 @@ class GuildConfig(models.Model):
     silent = models.BooleanField(
         help_text="Whether the responses of guesses get sent as ephemeral or not", default=False
     )
+    manual_drop_enabled = models.BooleanField(
+        help_text="Whether players are allowed to use the drop command in this server", default=True
+    )
+    tips_enabled = models.BooleanField(
+        help_text="Whether tips are displayed below spawn messages in this server", default=True
+    )
     admin_command_synced = models.BooleanField(
         help_text="True if slash admin commands are present in this server", default=False, editable=False
     )
@@ -96,7 +104,7 @@ class GuildConfig(models.Model):
 
 class Player(models.Model):
     discord_id = models.BigIntegerField(unique=True, help_text="Discord user ID")
-    money = models.PositiveBigIntegerField(help_text="Money posessed by the player", default=0)
+    money = models.PositiveBigIntegerField(help_text="Money posessed by the player", db_default=0)
     donation_policy = models.SmallIntegerField(
         choices=DonationPolicy.choices,
         help_text="How you want to handle donations",
@@ -155,17 +163,23 @@ class Player(models.Model):
         return self.mention_policy == MentionPolicy.ALLOW
 
     async def add_money(self, amount: int) -> int:
+        # incremented by the database, not from the in-memory value, so that concurrent
+        # updates cannot overwrite each other
         if amount <= 0:
             raise ValueError("Amount to add must be positive")
-        self.money += amount
-        await self.asave(update_fields=("money",))
+        await Player.objects.filter(pk=self.pk).aupdate(money=F("money") + amount)
+        await self.arefresh_from_db(fields=["money"])
         return self.money
 
     async def remove_money(self, amount: int) -> None:
-        if self.money < amount:
+        # the affordability check is part of the UPDATE, so two concurrent calls cannot both
+        # pass it and overdraw the account
+        if amount <= 0:
+            raise ValueError("Amount to remove must be positive")
+        updated = await Player.objects.filter(pk=self.pk, money__gte=amount).aupdate(money=F("money") - amount)
+        if not updated:
             raise ValueError("Not enough money")
-        self.money -= amount
-        await self.asave(update_fields=("money",))
+        await self.arefresh_from_db(fields=["money"])
 
     def can_afford(self, amount: int) -> bool:
         return self.money >= amount
@@ -254,9 +268,7 @@ class Special(models.Model):
         blank=True, null=True, help_text="End time of the event. If blank, the event is permanent"
     )
     rarity = models.FloatField(help_text="Value between 0 and 1, chances of using this special background.")
-    emoji = models.CharField(
-        max_length=20, blank=True, null=True, help_text="Either a unicode character or a discord emoji ID"
-    )
+    emoji = models.CharField(max_length=20, blank=True, null=True, help_text="A unicode character")
     background = models.ImageField(max_length=200, blank=True, null=True, help_text="1428x2000 PNG image")
     capacity_frame_enabled = models.BooleanField(help_text="Whether balls of this event use the built-in frame",
                                                  default=False)
@@ -348,6 +360,28 @@ class Ball(models.Model):
         return super().save(**kwargs)
 
 
+class BallGroup(models.Model):
+    name = models.CharField(max_length=64, unique=True)
+    countryballs = models.ManyToManyField(Ball, related_name="groups", blank=True)
+
+    objects: Manager[Self] = Manager()
+
+    _ball_ids: frozenset[int] = frozenset()
+
+    class Meta:
+        managed = True
+        db_table = "ballgroup"
+        verbose_name = "group"
+        verbose_name_plural = "groups"
+
+    def __str__(self) -> str:
+        return self.name
+
+    @cached_property
+    def balls(self) -> list[Ball]:
+        return [balls[i] for i in self._ball_ids if i in balls]
+
+
 class BallInstance(models.Model):
     catch_date = models.DateTimeField(auto_now_add=True)
     health_bonus = models.IntegerField(default=0)
@@ -387,6 +421,9 @@ class BallInstance(models.Model):
             models.Index(fields=("player_id",)),
             models.Index(fields=("special_id",)),
             models.Index(fields=("deleted",)),
+            models.Index(fields=("server_id",)),
+            models.Index(fields=("catch_date",)),
+            models.Index(fields=("server_id", "catch_date")),
         )
 
     def short_description(self, *, is_trade: bool = False) -> str:

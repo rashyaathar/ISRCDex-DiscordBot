@@ -2,12 +2,14 @@ import asyncio
 import logging
 import random
 import re
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import discord
+from asgiref.sync import sync_to_async
 from discord.ext import commands
 from discord.utils import format_dt
+from django.core.files.base import ContentFile
+from django.db import IntegrityError, transaction
 from django.urls import reverse
 
 from ballsdex.core.bot import BallsDexBot
@@ -15,8 +17,9 @@ from ballsdex.core.utils import checks
 from ballsdex.core.utils.buttons import ConfirmChoiceView
 from bd_models.models import Ball, BallInstance, Player, Special, Trade, TradeObject
 from settings.models import settings
+from settings.utils import format_currency
 
-from .flags import BallsCountFlags, GiveBallFlags, SpawnFlags
+from .flags import BallsCountFlags, CreateFlags, GiveBallFlags, SpawnFlags
 
 if TYPE_CHECKING:
     from ballsdex.packages.countryballs.cog import CountryBallsSpawner
@@ -24,19 +27,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("ballsdex.packages.admin.balls")
 FILENAME_RE = re.compile(r"^(.+)(\.\S+)$")
-
-
-async def save_file(attachment: discord.Attachment) -> Path:
-    path = Path(f"./admin_panel/media/{attachment.filename}")
-    match = FILENAME_RE.match(attachment.filename)
-    if not match:
-        raise TypeError("The file you uploaded lacks an extension.")
-    i = 1
-    while path.exists():
-        path = Path(f"./admin_panel/media/{match.group(1)}-{i}{match.group(2)}")
-        i = i + 1
-    await attachment.save(path)
-    return path.relative_to("./admin_panel/media/")
 
 
 async def _spawn_bomb(
@@ -229,6 +219,10 @@ async def balls_info(ctx: commands.Context[BallsDexBot], countryball_id: str):
     except BallInstance.DoesNotExist:
         await ctx.send(f"The {settings.collectible_name} ID you gave does not exist.", ephemeral=True)
         return
+    first_trade_object = (
+        await TradeObject.objects.filter(ballinstance=ball).select_related("player").order_by("trade__date").afirst()
+    )
+    first_owner = first_trade_object.player if first_trade_object else ball.player
     spawned_time = format_dt(ball.spawned_time, style="R") if ball.spawned_time else "N/A"
     catch_time = (
         (ball.catch_date - ball.spawned_time).total_seconds() if ball.catch_date and ball.spawned_time else "N/A"
@@ -237,6 +231,7 @@ async def balls_info(ctx: commands.Context[BallsDexBot], countryball_id: str):
     await ctx.send(
         f"**{settings.collectible_name.title()} ID:** {ball.pk}\n"
         f"**Player:** {ball.player}\n"
+        f"**First owner:** {first_owner}\n"
         f"**Name:** {ball.countryball}\n"
         f"**Attack:** {ball.attack}\n"
         f"**Attack bonus:** {ball.attack_bonus}\n"
@@ -272,19 +267,38 @@ async def balls_delete(ctx: commands.Context[BallsDexBot], countryball_id: str, 
         await ctx.send(f"The {settings.collectible_name} ID you gave is not valid.", ephemeral=True)
         return
     try:
-        ball = await BallInstance.objects.aget(id=ballIdConverted)
+        ball = await BallInstance.objects.prefetch_related("player").aget(id=ballIdConverted)
     except BallInstance.DoesNotExist:
         await ctx.send(f"The {settings.collectible_name} ID you gave does not exist.", ephemeral=True)
         return
+
+    owner = await ctx.bot.fetch_user(ball.player.discord_id)
+
+    method = "soft" if soft_delete else "hard"
+    view = ConfirmChoiceView(
+        ctx, accept_message=f"Confirmed, {method} deleting...", cancel_message="Request cancelled."
+    )
+    await ctx.send(
+        f"You are about to {method} delete {ball.description(include_emoji=True, bot=ctx.bot)} "
+        f"(ID: `{countryball_id}`) owned by `{owner}`. Are you sure?",
+        view=view,
+        ephemeral=True,
+    )
+    await view.wait()
+    if not view.value:
+        return
+
     if soft_delete:
         ball.deleted = True
         await ball.asave()
         await ctx.send(f"{settings.collectible_name.title()} {countryball_id} soft deleted.", ephemeral=True)
         log.info(f"{ctx.author} soft deleted {ball}({ball.pk}).", extra={"webhook": True})
     else:
+        ball_name = str(ball)
+        ball_id = ball.pk
         await ball.adelete()
         await ctx.send(f"{settings.collectible_name.title()} {countryball_id} hard deleted.", ephemeral=True)
-        log.info(f"{ctx.author} hard deleted {ball}({ball.pk}).", extra={"webhook": True})
+        log.info(f"{ctx.author} hard deleted {ball_name}({ball_id}).", extra={"webhook": True})
 
 
 @balls.command(name="transfer")
@@ -311,6 +325,20 @@ async def balls_transfer(ctx: commands.Context[BallsDexBot], countryball_id: str
     except BallInstance.DoesNotExist:
         await ctx.send(f"The {settings.collectible_name} ID you gave does not exist.", ephemeral=True)
         return
+
+    original_owner = await ctx.bot.fetch_user(original_player.discord_id)
+
+    view = ConfirmChoiceView(ctx, accept_message="Confirmed, transferring...", cancel_message="Request cancelled.")
+    await ctx.send(
+        f"You are about to transfer {ball.description(include_emoji=True, bot=ctx.bot)} "
+        f"(ID: `{countryball_id}`) from `{original_owner}` to `{user}`. Are you sure?",
+        view=view,
+        ephemeral=True,
+    )
+    await view.wait()
+    if not view.value:
+        return
+
     player, _ = await Player.objects.aget_or_create(discord_id=user.id)
     ball.player = player
     await ball.asave()
@@ -319,6 +347,90 @@ async def balls_transfer(ctx: commands.Context[BallsDexBot], countryball_id: str
     await TradeObject.objects.acreate(trade=trade, ballinstance=ball, player=original_player)
     await ctx.send(f"Transfered {ball}({ball.pk}) from {original_player} to {user}.", ephemeral=True)
     log.info(f"{ctx.author} transferred {ball}({ball.pk}) from {original_player} to {user}.", extra={"webhook": True})
+
+
+@balls.command(name="transferinv")
+@checks.has_permissions("bd_models.change_ballinstance")
+async def balls_transferinv(
+    ctx: commands.Context[BallsDexBot], source: discord.User, dest: discord.User, currency: bool = False
+):
+    """
+    Transfer the full inventory of a user to another.
+
+    Parameters
+    ----------
+    source: discord.User
+        The user whose inventory you want to transfer
+    dest: discord.User
+        The user who should receive the inventory
+    currency: bool
+        Whether the player's balance should also be transferred.
+    """
+    if source == dest:
+        await ctx.send("You specified the same source and destination.", ephemeral=True)
+        return
+    try:
+        source_player = await Player.objects.aget(discord_id=source.id)
+    except Player.DoesNotExist:
+        await ctx.send(f"User {source} does not have a player profile.", ephemeral=True)
+        return
+    qs = BallInstance.objects.filter(player=source_player)
+    balls_count = await qs.acount()
+    if balls_count == 0 and (not currency or source_player.money == 0):
+        await ctx.send(f"{source}'s inventory is empty.", ephemeral=True)
+        return
+
+    view = ConfirmChoiceView(ctx, accept_message="Confirmed, transferring...", cancel_message="Request cancelled.")
+    if currency:
+        text = (
+            f"Are you sure you want to transfer {balls_count} {settings.plural_collectible_name} and "
+            f"{format_currency(source_player.money, bot=ctx.bot)} from {source} to {dest}?"
+        )
+    else:
+        text = (
+            f"Are you sure you want to transfer {balls_count} {settings.plural_collectible_name} "
+            f"from {source} to {dest}?"
+        )
+    await ctx.send(text, view=view, ephemeral=True)
+    await view.wait()
+    if not view.value:
+        return
+
+    dest_player, _ = await Player.objects.aget_or_create(discord_id=dest.id)
+    transferred_money = source_player.money
+
+    @transaction.atomic
+    def perform_transfer():
+        trade = Trade.objects.create(
+            player1=source_player, player2=dest_player, player1_money=source_player.money if currency else 0
+        )
+        trade_objects: list[TradeObject] = []
+        for ball in qs:
+            trade_objects.append(TradeObject(trade=trade, ballinstance=ball, player=source_player))
+        TradeObject.objects.bulk_create(trade_objects)
+        updated = qs.update(player=dest_player, trade_player=source_player)
+        if currency:
+            dest_player.money += source_player.money
+            source_player.money = 0
+            dest_player.save(update_fields=("money",))
+            source_player.save(update_fields=("money",))
+        return updated
+
+    updated = await sync_to_async(perform_transfer)()
+
+    if currency:
+        text = (
+            f"{updated} {settings.plural_collectible_name} and {format_currency(transferred_money, bot=ctx.bot)} "
+            f"transferred from {source} to {dest}."
+        )
+    else:
+        text = f"{updated} {settings.plural_collectible_name} transferred from {source} to {dest}."
+    await ctx.send(text, ephemeral=True)
+    log.info(
+        f"{ctx.author} transferred inventory of {source} ({source.id}, {updated} {settings.plural_collectible_name}, "
+        f"{format_currency(transferred_money if currency else 0, bot=ctx.bot)}) to {dest} ({dest.id}).",
+        extra={"webhook": True},
+    )
 
 
 @balls.command(name="reset")
@@ -412,3 +524,89 @@ async def balls_count(ctx: commands.Context[BallsDexBot], *, flags: BallsCountFl
         await ctx.send(
             f"There {verb} {balls} {special_str}{country}{settings.collectible_name}{plural}.", ephemeral=True
         )
+
+
+@balls.command(name="create")
+@checks.has_permissions("bd_models.add_ball")
+async def balls_create(
+    ctx: commands.Context[BallsDexBot],
+    wild_card: discord.Attachment,
+    collection_card: discord.Attachment,
+    *,
+    flags: CreateFlags,
+):
+    """
+    Create a countryball.
+
+    Parameters
+    ----------
+    wild_card: discord.Attachment
+        Image used to spawn the countryball
+    collection_card: discord.Attachment
+        Image used when displaying countryballs
+    """
+    if not flags.emoji_id.isnumeric():
+        await ctx.send("The emoji ID isn't a valid number.", ephemeral=True)
+        return
+    emoji = ctx.bot.get_emoji(int(flags.emoji_id))
+    if not emoji:
+        await ctx.send(
+            "The bot couldn't find the given emoji. Maybe it doesn't exist or the bot doesn't have access to it.",
+            ephemeral=True,
+        )
+        return
+    await ctx.defer(ephemeral=True)
+
+    try:
+        wild_card_data = await wild_card.read()
+        collection_card_data = await collection_card.read()
+
+        ball = await Ball.objects.acreate(
+            country=flags.name,
+            health=flags.health,
+            attack=flags.attack,
+            rarity=flags.rarity,
+            emoji_id=emoji.id,
+            credits=flags.credits,
+            capacity_name=flags.capacity_name,
+            capacity_description=flags.capacity_description,
+            enabled=flags.enabled,
+            tradeable=flags.tradeable,
+            regime=flags.regime,
+            economy=flags.economy,
+            wild_card=ContentFile(wild_card_data, wild_card.filename),
+            collection_card=ContentFile(collection_card_data, collection_card.filename),
+        )
+    except IntegrityError:
+        log.exception(
+            f"Failed creating {settings.collectible_name} because "
+            f"a {settings.collectible_name} with that name ({flags.name}) already exists.",
+            exc_info=True,
+            extra={"webhook": True},
+        )
+        await ctx.send(
+            f"An error occurred while creating the {settings.collectible_name}. Check the error in bot logs.",
+            ephemeral=True,
+        )
+        return
+    except Exception:
+        log.exception(
+            f"Failed creating {settings.collectible_name} with admin command", exc_info=True, extra={"webhook": True}
+        )
+        await ctx.send(
+            f"An error occurred while creating the {settings.collectible_name}. Check the error in bot logs.",
+            ephemeral=True,
+        )
+        return
+    else:
+        await ctx.bot.load_cache()
+        files = [await wild_card.to_file(), await collection_card.to_file()]
+        admin_url = f"[View online](<{reverse('admin:bd_models_ball_change', args=(ball.pk,))}>)"
+        await ctx.send(
+            f"A new {settings.collectible_name} has been created! The internal cache was reloaded.\n"
+            f"{admin_url}\n"
+            f"{flags.name=} regime={flags.regime.name} economy={flags.economy.name if flags.economy else None} "
+            f"{flags.health=} {flags.attack=} {flags.rarity=} {flags.enabled=} {flags.tradeable=} emoji={emoji}",
+            files=files,
+        )
+        log.info(f'{ctx.author} created a new {settings.collectible_name} "{ball.country}"', extra={"webhook": True})
