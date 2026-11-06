@@ -36,17 +36,17 @@ artwork_size = [b - a for a, b in zip(*CORNERS)]
 # image viewer. There are options available to specify the ball or the special background,
 # use the "--help" flag to view all options.
 
-title_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont.ttf"), 170)
+title_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont_wght.ttf"), 170)
 title_font.set_variation_by_name('SemiBold')
-capacity_name_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont.ttf"), 110)
+capacity_name_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont_wght.ttf"), 110)
 capacity_name_font.set_variation_by_name('Medium')
-capacity_description_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont.ttf"), 75)
+capacity_description_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont_wght.ttf"), 75)
 capacity_description_font.set_variation_by_name('Regular')
-stats_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont.ttf"), 130)
+stats_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont_wght.ttf"), 130)
 stats_font.set_variation_by_name('SemiBold')
-rarity_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont.ttf"), 50)
+rarity_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont_wght.ttf"), 50)
 rarity_font.set_variation_by_name('Light')
-credits_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont.ttf"), 40)
+credits_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont_wght.ttf"), 40)
 credits_font.set_variation_by_name('Light')
 
 credits_color_cache = {}
@@ -99,8 +99,8 @@ def draw_card(ball_instance: "BallInstance") -> tuple[Image.Image, dict[str, Any
     draw = ImageDraw.Draw(image, 'RGBA')
 
     # Capacity Frame: draw rectangle behind capacity and stats (disable if baked into template)
-    if (not ball_instance.specialcard) or (ball_instance.specialcard and ball_instance.capacity_frame_drawn):
-        draw.rectangle(((35, 1040), (1392, 1850)), fill=(0, 0, 0, 128), outline=(255, 255, 255, 255), width=5)
+    # if (not ball_instance.specialcard): #or (ball_instance.specialcard and ball_instance.capacity_frame_drawn):
+    #     draw.rectangle(((35, 1040), (1392, 1850)), fill=(0, 0, 0, 128), outline=(255, 255, 255, 255), width=5)
     #draw.text((50, 20), ball.short_name or ball.country, font=title_font, stroke_width=2, stroke_fill=(0, 0, 0, 255))
     # Draw name
     draw.text((40, 10), ball.short_name or ball.country, font=title_font, stroke_width=5,
