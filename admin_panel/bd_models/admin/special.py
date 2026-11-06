@@ -25,11 +25,12 @@ class SpecialAdmin(admin.ModelAdmin):
                 "at the specified time.",
             },
         ),
-        ("Advanced", {"fields": ["tradeable", "hidden"], "classes": ["collapse"]}),
+        ("Advanced", {"fields": ["capacity_frame_enabled", "tradeable", "hidden"], "classes": ["collapse"]}),
     ]
 
-    list_display = ["name", "pk", "emoji_display", "start_date", "end_date", "rarity", "hidden"]
-    list_editable = ["hidden", "rarity"]
+    list_display = ["name", "pk", "emoji_display", "start_date", "end_date", "rarity", "hidden",
+                    "capacity_frame_enabled"]
+    list_editable = ["hidden", "capacity_frame_enabled", "rarity"]
     list_filter = ["hidden", "tradeable"]
 
     search_fields = ["name", "catch_phrase", "pk"]
