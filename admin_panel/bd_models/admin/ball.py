@@ -17,7 +17,8 @@ if TYPE_CHECKING:
 
 @admin.register(Regime)
 class RegimeAdmin(admin.ModelAdmin):
-    list_display = ("name", "background_image", "pk")
+    list_display = ("name", "background_image", "capacity_frame_enabled", "pk")
+    list_editable = ("capacity_frame_enabled",)
     search_fields = ("name",)
 
     @admin.display()

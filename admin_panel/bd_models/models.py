@@ -204,6 +204,9 @@ class Regime(models.Model):
     name = models.CharField(max_length=64)
     background = models.ImageField(max_length=200, help_text="1428x2000 PNG image")
 
+    capacity_frame_enabled = models.BooleanField(default=True,
+    help_text = "Automatically draw a frame around the capacity and stat field.")
+
     objects: Manager[Self] = Manager()
 
     class Meta:
@@ -271,7 +274,7 @@ class Special(models.Model):
     emoji = models.CharField(max_length=20, blank=True, null=True, help_text="A unicode character")
     background = models.ImageField(max_length=200, blank=True, null=True, help_text="1428x2000 PNG image")
     capacity_frame_enabled = models.BooleanField(help_text="Whether balls of this event use the built-in frame",
-                                                 default=False)
+                                                 default=True)
     tradeable = models.BooleanField(help_text="Whether balls of this event can be traded", default=True)
     hidden = models.BooleanField(help_text="Hides the event from user commands", default=False)
     credits = models.CharField(max_length=64, help_text="Author of the special event artwork", null=True)
@@ -475,7 +478,9 @@ class BallInstance(models.Model):
 
     @property
     def capacity_frame_drawn(self) -> bool:
-        return getattr(self.specialcard, "capacity_frame_enabled", False)
+        if self.specialcard:
+            return self.specialcard.capacity_frame_enabled
+        return self.countryball.cached_regime.capacity_frame_enabled
 
     @admin.display(description="Countryball")
     def admin_description(self) -> SafeText:
