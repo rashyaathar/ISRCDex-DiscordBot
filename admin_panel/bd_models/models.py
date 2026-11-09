@@ -333,6 +333,12 @@ class Ball(models.Model):
         # verbose_name = settings.collectible_name
         # verbose_name_plural = settings.plural_collectible_name
 
+    class RarityClass(models.TextChoices):
+        COMMON = "common"
+        UNCOMMON = "uncommon"
+        RARE="rare"
+        SUPER_RARE="super rare"
+
     @property
     def cached_regime(self) -> Regime:
         return regimes.get(self.regime_id) or self.regime
@@ -340,6 +346,10 @@ class Ball(models.Model):
     @property
     def cached_economy(self) -> Economy | None:
         return economies.get(self.economy_id) or self.economy if self.economy_id else None
+
+    @property
+    def total_rarity(self) -> float:
+        return sum(ball.rarity for ball in balls.values() if ball.enabled)
 
     def __str__(self) -> str:
         return self.country
@@ -361,6 +371,19 @@ class Ball(models.Model):
         self.translations = lower_catch_names(self.translations)
 
         return super().save(**kwargs)
+
+    def get_spawn_chance(self, total_rarity:float) -> float:
+        if total_rarity <= 0:
+            return 0.0
+        return self.rarity/total_rarity
+
+    def get_rarity_class(self) -> Ball.RarityClass:
+        chance = self.get_spawn_chance(total_rarity=self.total_rarity)
+        if chance < 0.05:
+            return Ball.RarityClass.RARE
+        if chance < 0.1:
+            return Ball.RarityClass.UNCOMMON
+        return Ball.RarityClass.COMMON
 
 
 class BallGroup(models.Model):

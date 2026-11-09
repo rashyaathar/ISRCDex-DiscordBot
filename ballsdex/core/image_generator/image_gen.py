@@ -156,8 +156,8 @@ def draw_card(ball_instance: "BallInstance") -> tuple[Image.Image, dict[str, Any
     # Draw rarity and credits
     if settings.show_rarity:
         #draw.text((1200, 50), str(ball.rarity), font=stats_font, stroke_width=2, stroke_fill=(0, 0, 0, 255))
-        draw.text((45, 190), f"Rarity: {str(ball.rarity)}", font=rarity_font,
-                  stroke_width=2, stroke_fill=(0, 0, 0, 255))
+        draw.text((45, 190), f"Rarity: {str(ball.rarity)} ({str(ball.get_rarity_class())})", font=rarity_font,
+                  fill=(255, 255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0, 255))
     if card_name in credits_color_cache:
         credits_color = credits_color_cache[card_name]
     else:
