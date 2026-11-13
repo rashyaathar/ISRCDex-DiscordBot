@@ -4,6 +4,7 @@ from .guild import GuildAdmin
 from .player import PlayerAdmin
 from .special import SpecialAdmin
 from .trade import TradeAdmin
+from .rarity import RarityAdmin
 
 __all__ = [
     "BallAdmin",
@@ -15,4 +16,5 @@ __all__ = [
     "PlayerAdmin",
     "SpecialAdmin",
     "TradeAdmin",
+    "RarityAdmin"
 ]

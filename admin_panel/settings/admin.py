@@ -128,6 +128,7 @@ class SettingsAdmin(admin.ModelAdmin):
                     "spawn_chance_min",
                     "spawn_chance_max",
                     "show_rarity",
+                    "rarity_tiers_enabled",
                     "tip_chance",
                     "tip_position",
                     "tip_container",

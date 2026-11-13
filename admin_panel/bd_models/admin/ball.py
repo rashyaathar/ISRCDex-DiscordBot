@@ -7,6 +7,7 @@ from django.urls import reverse
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
 from django.utils.text import capfirst
+from django.db.models import Sum
 
 from ..models import Ball, BallGroup, BallInstance, Economy, Regime, TradeObject, transform_media
 
@@ -83,10 +84,10 @@ class BallGroupAdmin(admin.ModelAdmin):
 @admin.register(Ball)
 class BallAdmin(admin.ModelAdmin):
     autocomplete_fields = ("regime", "economy")
-    readonly_fields = ("collection_image", "spawn_image")
+    readonly_fields = ("collection_image", "spawn_image", "spawn_chance")
     save_on_top = True
     fieldsets = [
-        (None, {"fields": ["country", "health", "attack", "rarity", "emoji_id", "economy", "regime"]}),
+        (None, {"fields": ["country", "health", "attack", "rarity", "spawn_chance", "emoji_id", "economy", "regime"]}),
         (
             "Assets",
             {
@@ -121,6 +122,14 @@ class BallAdmin(admin.ModelAdmin):
         return mark_safe(
             f'<img src="https://cdn.discordapp.com/emojis/{obj.emoji_id}.png?size=40" title="ID: {obj.emoji_id}" />'
         )
+
+    @admin.display(description="Spawn Chance")
+    def spawn_chance(self, obj: Ball) -> str:
+        if not obj.enabled:
+            return "0% (disabled)"
+        total_rarity = Ball.objects.all().aggregate(total=Sum("rarity"))["total"] or 0
+        chance = obj.get_spawn_chance(total_rarity)
+        return f"{chance:.2%}"
 
     def formfield_for_dbfield(
         self, db_field: "Field[Any, Any]", request: "HttpRequest | None", **kwargs: Any

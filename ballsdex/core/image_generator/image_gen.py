@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 SOURCES_PATH = Path(os.path.dirname(os.path.abspath(__file__)), "./src")
 WIDTH = 1500
 HEIGHT = 2000
-RADIUS = 80          # Set radius for rounded rectangles
+RADIUS = 80  # Set radius for rounded rectangles
 
 RECTANGLE_WIDTH = WIDTH - 40
 RECTANGLE_HEIGHT = (HEIGHT // 5) * 2
@@ -37,17 +37,17 @@ artwork_size = [b - a for a, b in zip(*CORNERS)]
 # use the "--help" flag to view all options.
 
 title_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont_wght.ttf"), 170)
-title_font.set_variation_by_name('SemiBold')
+title_font.set_variation_by_name("SemiBold")
 capacity_name_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont_wght.ttf"), 110)
-capacity_name_font.set_variation_by_name('Medium')
+capacity_name_font.set_variation_by_name("Medium")
 capacity_description_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont_wght.ttf"), 75)
-capacity_description_font.set_variation_by_name('Regular')
+capacity_description_font.set_variation_by_name("Regular")
 stats_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont_wght.ttf"), 130)
-stats_font.set_variation_by_name('SemiBold')
+stats_font.set_variation_by_name("SemiBold")
 rarity_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont_wght.ttf"), 50)
-rarity_font.set_variation_by_name('Light')
+rarity_font.set_variation_by_name("Light")
 credits_font = ImageFont.truetype(str(SOURCES_PATH / "Outfit-VariableFont_wght.ttf"), 40)
-credits_font.set_variation_by_name('Light')
+credits_font.set_variation_by_name("Light")
 
 credits_color_cache = {}
 
@@ -64,11 +64,12 @@ def open_image(image_file: "ImageFieldFile") -> Image.Image:
     """
     return Image.open(image_file.path).convert("RGBA")
 
+
 # Draw alpha layer (use for rounded rectangles)
 def create_alpha_layer(image, radius) -> Image.Image:
-    alpha = Image.new('L', image.size, 0)
+    alpha = Image.new("L", image.size, 0)
     draw = ImageDraw.Draw(alpha)
-    draw.rounded_rectangle([0,0,image.width,image.height], radius=radius, fill=255)
+    draw.rounded_rectangle([0, 0, image.width, image.height], radius=radius, fill=255)
 
     image.putalpha(alpha)
     return image
@@ -93,18 +94,17 @@ def draw_card(ball_instance: "BallInstance") -> tuple[Image.Image, dict[str, Any
             special_credits += f" • Special Author: {ball_instance.specialcard.credits}"
     else:
         image = Image.open(ball.cached_regime.background)
-    image = image.convert('RGB')                            # Convert to RGB if capacity frame enabled, RGBA otherwise
+    image = image.convert("RGB")  # Convert to RGB if capacity frame enabled, RGBA otherwise
     icon = Image.open(ball.cached_economy.icon).convert("RGBA") if ball.cached_economy else None
 
-    draw = ImageDraw.Draw(image, 'RGBA')
+    draw = ImageDraw.Draw(image, "RGBA")
 
     # Capacity Frame: draw rectangle behind capacity and stats (disable if baked into template)
-    if (ball_instance.capacity_frame_drawn):
+    if ball_instance.capacity_frame_drawn:
         draw.rectangle(((35, 1040), (1392, 1850)), fill=(0, 0, 0, 128), outline=(255, 255, 255, 255), width=5)
-    #draw.text((50, 20), ball.short_name or ball.country, font=title_font, stroke_width=2, stroke_fill=(0, 0, 0, 255))
+    # draw.text((50, 20), ball.short_name or ball.country, font=title_font, stroke_width=2, stroke_fill=(0, 0, 0, 255))
     # Draw name
-    draw.text((40, 10), ball.short_name or ball.country, font=title_font, stroke_width=5,
-              stroke_fill=(0, 0, 0, 255))
+    draw.text((40, 10), ball.short_name or ball.country, font=title_font, stroke_width=5, stroke_fill=(0, 0, 0, 255))
 
     # Draw capacity
     cap_name = textwrap.wrap(f"Ability: {ball.capacity_name}", width=26)
@@ -155,9 +155,26 @@ def draw_card(ball_instance: "BallInstance") -> tuple[Image.Image, dict[str, Any
 
     # Draw rarity and credits
     if settings.show_rarity:
-        #draw.text((1200, 50), str(ball.rarity), font=stats_font, stroke_width=2, stroke_fill=(0, 0, 0, 255))
-        draw.text((45, 190), f"Rarity: {str(ball.rarity)} ({str(ball.get_rarity_class())})", font=rarity_font,
-                  fill=(255, 255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0, 255))
+        # draw.text((1200, 50), str(ball.rarity), font=stats_font, stroke_width=2, stroke_fill=(0, 0, 0, 255))
+        rarity_tier = ball.get_rarity_tier()
+        if rarity_tier is None:
+            draw.text(
+                (45, 190),
+                f"Rarity: {str(ball.rarity)}",
+                font=rarity_font,
+                fill=(255, 255, 255, 255),
+                stroke_width=2,
+                stroke_fill=(0, 0, 0, 255),
+            )
+        else:
+            draw.text(
+                (45, 190),
+                f"Rarity: {ball.rarity} ({rarity_tier})",
+                font=rarity_font,
+                fill=(255, 255, 255, 255),
+                stroke_width=2,
+                stroke_fill=(0, 0, 0, 255),
+            )
     if card_name in credits_color_cache:
         credits_color = credits_color_cache[card_name]
     else:
@@ -175,7 +192,7 @@ def draw_card(ball_instance: "BallInstance") -> tuple[Image.Image, dict[str, Any
     )
 
     # Open and place artwork
-    artwork = Image.open(ball.collection_card).convert('RGBA')
+    artwork = Image.open(ball.collection_card).convert("RGBA")
     image.paste(ImageOps.fit(artwork, artwork_size), CORNERS[0])  # type: ignore
 
     # Disabled by default, enable if rounded rectangle used as background
@@ -187,4 +204,4 @@ def draw_card(ball_instance: "BallInstance") -> tuple[Image.Image, dict[str, Any
         icon.close()
     artwork.close()
 
-    return image, {"format": 'WEBP'}
+    return image, {"format": "WEBP"}

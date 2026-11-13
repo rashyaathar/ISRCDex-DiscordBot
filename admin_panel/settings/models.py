@@ -115,7 +115,10 @@ class Settings(models.Model):
         help_text="Min/max bonus for health statistic. A value of 20 means it goes from -20% to 20%", default=20
     )
     show_rarity = models.BooleanField(
-        help_text="Whether to show the rarity on the card (replaces economy icon)", default=False
+        help_text="Whether to show the rarity on the card", default=False
+    )
+    rarity_tiers_enabled = models.BooleanField(
+        help_text="Toggle whether or not rarity tiers are enabled", default=False
     )
     catch_button_label = models.CharField(max_length=80, help_text="Label of the catch button", default="Catch me")
 

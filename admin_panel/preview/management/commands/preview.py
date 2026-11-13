@@ -3,6 +3,7 @@ import os
 import sys
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
+from asgiref.sync import sync_to_async
 
 from ballsdex.core.image_generator.image_gen import draw_card
 from bd_models.models import Ball, BallInstance, Special
@@ -53,7 +54,7 @@ class Command(BaseCommand):
         )
 
         instance = BallInstance(ball=ball, special=special)
-        image, kwargs = draw_card(instance)
+        image, kwargs = await sync_to_async(draw_card)(instance)
 
         if sys.platform not in ("win32", "darwin") and not os.environ.get("DISPLAY"):
             self.stderr.write(

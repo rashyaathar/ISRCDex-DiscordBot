@@ -19,6 +19,7 @@ from django.utils import timezone
 from django.utils.functional import cached_property
 from django.utils.safestring import SafeText, mark_safe
 from django.utils.timezone import now
+from django.core.validators import MinValueValidator, MaxValueValidator
 
 from ballsdex.core.discord import View
 from ballsdex.core.image_generator.image_gen import draw_card
@@ -295,6 +296,7 @@ class Ball(models.Model):
     health = models.IntegerField(help_text="Ball health stat")
     attack = models.IntegerField(help_text="Ball attack stat")
     rarity = models.FloatField(help_text="Rarity of this ball")
+    chance = models.FloatField(help_text="Chance of this ball to spawn", default=0.0)
     emoji_id = models.BigIntegerField(help_text="Emoji ID for this ball")
     wild_card = models.ImageField(max_length=200, help_text="Image used when a new ball spawns in the wild")
     collection_card = models.ImageField(max_length=200, help_text="Image used when displaying balls")
@@ -332,12 +334,6 @@ class Ball(models.Model):
         # these are set at startup when settings are read
         # verbose_name = settings.collectible_name
         # verbose_name_plural = settings.plural_collectible_name
-
-    class RarityClass(models.TextChoices):
-        COMMON = "common"
-        UNCOMMON = "uncommon"
-        RARE="rare"
-        SUPER_RARE="super rare"
 
     @property
     def cached_regime(self) -> Regime:
@@ -377,13 +373,21 @@ class Ball(models.Model):
             return 0.0
         return self.rarity/total_rarity
 
-    def get_rarity_class(self) -> Ball.RarityClass:
-        chance = self.get_spawn_chance(total_rarity=self.total_rarity)
-        if chance < 0.05:
-            return Ball.RarityClass.RARE
-        if chance < 0.1:
-            return Ball.RarityClass.UNCOMMON
-        return Ball.RarityClass.COMMON
+
+    def get_rarity_tier(self) -> str | None:
+        if not settings.rarity_tiers_enabled:
+            return None
+        chance = self.get_spawn_chance(self.total_rarity)
+
+        tiers = list(
+            RarityTier.objects.filter(enabled_tier=True).order_by("threshold").values_list("rarity_tier", "threshold")
+        )
+
+        for tier_name, threshold in tiers:
+            if chance <= threshold:
+                return tier_name
+
+        return None
 
 
 class BallGroup(models.Model):
@@ -714,3 +718,23 @@ class Block(models.Model):
     class Meta:
         managed = True
         db_table = "block"
+
+class RarityTier(models.Model):
+    rarity_tier = models.CharField(unique=True, max_length=48, verbose_name="Rarity Tier")
+    threshold = models.FloatField(
+        validators = [MinValueValidator(0), MaxValueValidator(1)],
+        help_text="Maximum spawn chance for a ball of this rarity tier")
+    enabled_tier = models.BooleanField(default=True, help_text="Whether or not this tier is enabled")
+
+    class Meta:
+        managed = True
+        db_table = "raritytier"
+        ordering = ("threshold",)
+        verbose_name = "rarity tier"
+        verbose_name_plural = "rarity tiers"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("threshold",),
+                name="unique_rarity_tier_threshold",
+            )
+        ]
