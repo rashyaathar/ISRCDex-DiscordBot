@@ -1,4 +1,4 @@
-# BallsDex Discord Bot
+# ISRCDex (a BallsDex Discord Bot fork)
 
 [![Discord server](https://img.shields.io/discord/1049118743101452329?color=7489d5&logo=discord&logoColor=ffffff)](https://discord.gg/Qn2Rkdkxwc)
 [![Pre-commit](https://github.com/Ballsdex-Team/BallsDex-DiscordBot/actions/workflows/pre-commit.yml/badge.svg)](https://github.com/Ballsdex-Team/BallsDex-DiscordBot/actions/workflows/pre-commit.yml)
@@ -10,6 +10,8 @@
 BallsDex is a bot for collecting countryballs on Discord and exchange them with your friends!
 
 You can invite the official bot [here](https://discord.com/api/oauth2/authorize?client_id=999736048596816014&permissions=537193536&scope=bot%20applications.commands).
+
+ISRCDex is a fork of the BallsDex codebase that integrates further image-generation features and some quality-of-life improvements, including a user-configurable rarity tier system.
 
 ## Discord server
 
